@@ -1,0 +1,112 @@
+[
+  {
+    "id": "di-001",
+    "topic": "di",
+    "difficulty": "core",
+    "question": "Transient, scoped, singleton: one sentence each. For scoped, be precise: scoped to what exactly? Who creates that scope in an ASP.NET Core app and when is it disposed? And what does scoped mean in a `BackgroundService` consuming a queue, where there are no HTTP requests?",
+    "answer": "Transient: a new instance for every resolution. Singleton: one instance per root container for the life of the process. Scoped: one instance per `IServiceScope`, which is just an object you obtain from `IServiceScopeFactory.CreateScope()`; it owns a child `IServiceProvider` and disposes everything it created when the scope is disposed. In ASP.NET Core a middleware near the top of the pipeline creates a scope for every request, exposes it as `HttpContext.RequestServices` and disposes it when the response ends, which is the only reason 'scoped' means 'per request'. In a `BackgroundService` there is no scope unless you create one: inject `IServiceScopeFactory`, open `using var scope = factory.CreateScope()` per message or batch, and resolve the `DbContext` from `scope.ServiceProvider`. Resolving a scoped service from the root provider works but makes it live forever.",
+    "followups": [
+      "What does `ValidateScopes` do when you resolve a scoped service from the root?",
+      "Why can a `BackgroundService` not simply take `AppDbContext` in its constructor?",
+      "When would you create one scope per batch instead of one per message?"
+    ],
+    "tags": ["lifetimes", "scopes", "backgroundservice"]
+  },
+  {
+    "id": "di-002",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "`AddDbContext<AppDbContext>` plus `AddSingleton<IOrderCache, OrderCache>`, where `OrderCache` takes `AppDbContext` in its constructor and keeps it in a field. Does the app start? Does the answer differ between Development and Production and why? If it starts in Production, what breaks after a day of traffic, and how do you fix it while keeping the cache a singleton?",
+    "answer": "`AddDbContext` registers the context as scoped and the singleton captures it in a field: a captive dependency, the singleton holding a per-request object for the life of the process. In Development, `CreateApplicationBuilder`/`WebApplication.CreateBuilder` enable `ValidateScopes` and `ValidateOnBuild`, so startup throws 'Cannot consume scoped service AppDbContext from singleton IOrderCache'. In Production validation is off by default and the app starts. The single `DbContext` then serves all requests: it is not thread-safe, so concurrent requests hit 'A second operation was started on this context instance before a previous operation completed'; the change tracker grows without bound; and data goes stale. Fix: keep the singleton but inject `IServiceScopeFactory` and create a scope per operation, or register `AddDbContextFactory<AppDbContext>` and inject `IDbContextFactory<AppDbContext>`. Enable both validations in all environments via `UseDefaultServiceProvider`.",
+    "followups": [
+      "Why is validation off in Production by default?",
+      "Does a transient injected into a singleton have the same problem?",
+      "What is the lifetime rule in one sentence?"
+    ],
+    "tags": ["captive-dependency", "efcore", "validation"]
+  },
+  {
+    "id": "di-003",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "Your team moves a large WPF app's service layer from Unity (under Prism) to `Microsoft.Extensions.DependencyInjection`. What do you lose, what do you do instead for each item, and what are you glad to lose?",
+    "answer": "MS.DI is deliberately minimal. Lost: interception/AOP (Unity.Interception), replaced by hand-written decorators or Scrutor's `Decorate`; property injection, replaced by constructor injection only; named registrations, replaced by keyed services in .NET 8+ (`AddKeyedScoped`, `[FromKeyedServices]`) or a factory delegate; child containers, replaced by scopes with no per-scope overrides; custom lifetime managers, replaced by exactly three lifetimes; convention-based registration, replaced by Scrutor `Scan`. Behavioural differences: MS.DI disposes `IDisposable` instances it created when their scope ends, while Unity's default transient manager does not track them; the last registration wins when resolving a single `T` and `IEnumerable<T>` returns all registrations. Glad to lose: property injection, which hides dependencies, and interception magic, which hides call chains. Prism itself abstracts the container behind `IContainerRegistry`, so the module code changes less than the composition root.",
+    "followups": [
+      "How do you implement a decorator without Scrutor?",
+      "How do you register the same interface twice and choose at runtime?"
+    ],
+    "tags": ["unity", "prism", "wpf"]
+  },
+  {
+    "id": "di-004",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "Who disposes what in MS.DI? Describe a disposal-related memory leak that is common in long-running applications and how to avoid it.",
+    "answer": "The container disposes `IDisposable` and `IAsyncDisposable` instances that it created, when the owning scope or the root provider is disposed; instances you register yourself with `AddSingleton(instance)` are your responsibility. The leak: an `IDisposable` transient resolved from the root provider (directly, or injected into a singleton) is tracked by the root for disposal at shutdown, so every resolution accumulates until the process ends. Inside a per-request scope the same transient is disposed at the end of the request and is fine. Avoid it by never resolving transient disposables from the root: in singletons use `IServiceScopeFactory` or a factory, and in background services open a scope per unit of work. Use `await using var scope = factory.CreateAsyncScope()` when services implement `IAsyncDisposable`.",
+    "followups": [
+      "Why does `IHttpClientFactory` exist instead of registering `HttpClient` as transient or singleton?",
+      "What happens to a scoped `IAsyncDisposable` if the scope is disposed synchronously?"
+    ],
+    "tags": ["disposal", "memory-leak"]
+  },
+  {
+    "id": "di-005",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "What problems does `IHttpClientFactory` solve, how does it solve them, and what mistake do people make with typed clients?",
+    "answer": "Creating a new `HttpClient` per call exhausts sockets, because each handler opens its own connections that linger in TIME_WAIT; a single static `HttpClient` never picks up DNS changes, because its handler keeps connections forever. `IHttpClientFactory` pools `HttpMessageHandler` instances and rotates them (two-minute lifetime by default), so DNS changes are honoured while the cheap `HttpClient` wrappers are created freely. It also gives named and typed clients, central configuration, and a delegating-handler pipeline for resilience (`AddStandardResilienceHandler`). The mistake: typed clients are registered as transient, so capturing one in a singleton freezes its handler and defeats the rotation; inject the factory in singletons. The modern alternative is one long-lived client with `SocketsHttpHandler.PooledConnectionLifetime` set.",
+    "followups": [
+      "Why are typed clients transient and not scoped?",
+      "What does `PooledConnectionLifetime` do and how does it relate to handler rotation?"
+    ],
+    "tags": ["httpclientfactory", "sockets", "dns"]
+  },
+  {
+    "id": "di-006",
+    "topic": "di",
+    "difficulty": "core",
+    "question": "`IOptions<T>`, `IOptionsSnapshot<T>`, `IOptionsMonitor<T>`: what is the difference, which can be injected where, and how do you fail fast on bad configuration?",
+    "answer": "`IOptions<T>` is a singleton computed once; it never reloads. `IOptionsSnapshot<T>` is scoped and recomputed per scope, so it sees configuration changes on the next request and supports named options; it cannot be injected into singletons. `IOptionsMonitor<T>` is a singleton exposing `CurrentValue` and an `OnChange` callback, which is what singletons and background services should use. Fail fast with `builder.Services.AddOptions<T>().BindConfiguration(\"Section\").ValidateDataAnnotations().ValidateOnStart()`, optionally plus a custom `Validate` lambda, so a misconfigured deployment dies at startup rather than on first use. Prefer injecting the options type into domain code over reading `IConfiguration` by string key.",
+    "followups": [
+      "What happens if you inject `IOptionsSnapshot<T>` into a singleton?",
+      "How does `reloadOnChange` interact with the three interfaces?"
+    ],
+    "tags": ["options", "configuration"]
+  },
+  {
+    "id": "di-007",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "Service locator anti-pattern and constructor over-injection: what is wrong with each, and what is the fix?",
+    "answer": "Injecting `IServiceProvider` and calling `GetService` inside business classes hides dependencies: the constructor no longer declares what the class needs, missing registrations fail at runtime instead of startup, and tests have to build a container. Legitimate uses are confined to infrastructure at the composition root: factories, opening scopes in background services, resolving by a runtime key. Constructor over-injection (six or more dependencies) is a Single Responsibility smell rather than a DI problem: split the class, introduce a facade that aggregates related services, or move cross-cutting concerns such as logging and validation into decorators or the pipeline. Do not fix it with property injection or a locator; that hides the symptom and keeps the design problem.",
+    "followups": [
+      "How do you unit-test a class that legitimately depends on `IServiceScopeFactory`?",
+      "What is a composition root and why should there be exactly one?"
+    ],
+    "tags": ["anti-patterns", "design"]
+  },
+  {
+    "id": "di-008",
+    "topic": "di",
+    "difficulty": "senior",
+    "question": "How do you register several implementations of the same interface and choose one at runtime? Cover keyed services, factories and open generics.",
+    "answer": "Since .NET 8 you can register the same interface under keys: `AddKeyedSingleton<IPaymentGateway, StripeGateway>(\"stripe\")`, then resolve with `[FromKeyedServices(\"stripe\")]` in constructors or `GetRequiredKeyedService` from the provider. Before that, the options were a factory delegate `Func<string, IPaymentGateway>` built in the composition root, or injecting `IEnumerable<IPaymentGateway>` and selecting by a property on each implementation. Open generics register once for all closed types: `AddScoped(typeof(IRepository<>), typeof(EfRepository<>))`. For objects that need both container services and runtime arguments, `ActivatorUtilities.CreateInstance<T>(provider, args)` avoids hand-wiring. Keep string keys at the boundary and map them to a type-safe strategy early.",
+    "followups": [
+      "How does a keyed service interact with `IEnumerable<T>` resolution?",
+      "How would you implement the strategy pattern over keyed services so adding a provider needs no code changes elsewhere?"
+    ],
+    "tags": ["keyed-services", "factories", "generics"]
+  },
+  {
+    "id": "di-009",
+    "topic": "di",
+    "difficulty": "deep",
+    "question": "What do `ValidateScopes` and `ValidateOnBuild` check, what can they not catch, and how do you make the composition root testable?",
+    "answer": "`ValidateScopes` throws when a scoped service is resolved from the root provider or injected into a singleton. `ValidateOnBuild` constructs every registration when the provider is built, so missing dependencies and bad constructors fail at startup. Both are on only in Development by default; enable them everywhere, the cost is a one-time startup check. They cannot catch failures hidden inside factory lambdas that only run on resolution, keyed services resolved dynamically, or wrong lifetimes that are technically allowed (a singleton capturing a transient). Complement them with a test that builds the real host or `WebApplicationFactory` and resolves every registered service type, `ValidateOnStart` on options, and architecture tests that enforce layering. This turns most 'works on my machine' DI bugs into CI failures.",
+    "followups": [
+      "How would you detect a singleton capturing a transient automatically?",
+      "What is the cost of `ValidateOnBuild` in a service with hundreds of registrations?"
+    ],
+    "tags": ["validation", "testing", "composition-root"]
+  }
+]

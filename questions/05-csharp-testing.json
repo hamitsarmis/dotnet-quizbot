@@ -1,0 +1,110 @@
+[
+  {
+    "id": "cs-001",
+    "topic": "csharp",
+    "difficulty": "core",
+    "question": "`record class`, `class`, `struct`, `record struct`: semantics, when to use each, and the pitfalls.",
+    "answer": "A `record class` is a reference type with value-based equality, `with` expressions, deconstruction and a generated `ToString`, ideal for immutable DTOs and value objects; mutating a record used as a dictionary key breaks hashing, and equality in hierarchies checks the `EqualityContract`. A `class` is for things with identity, entities and large or mutable objects. A `struct` is a value type copied on assignment: keep it small (around 16 bytes), make it `readonly` to avoid defensive copies, and remember `default(T)` is always a valid value. A `record struct` adds value equality and `with` to a struct. Calling interface methods on a struct boxes it unless you go through a generic constraint, and mutable structs inside a `List<T>` are modified on a copy.",
+    "followups": [
+      "Why does a mutable struct in a `List<T>` behave surprisingly?",
+      "When do you need a `ref struct`?"
+    ],
+    "tags": ["records", "structs"]
+  },
+  {
+    "id": "cs-002",
+    "topic": "csharp",
+    "difficulty": "core",
+    "question": "What do nullable reference types actually do at runtime, where do they fail to protect you, and how do you use them well?",
+    "answer": "Nothing at runtime: `string?` and `string` compile to the same type, so NRT is purely compile-time flow analysis. It cannot protect you from nulls arriving through reflection, deserialization, EF materialization or libraries without annotations, so validate explicitly at trust boundaries such as API input and database reads. Enable `<Nullable>enable</Nullable>` with warnings as errors in new code, annotate helpers with `[NotNullWhen]`, `[MaybeNull]` and `[MemberNotNull]`, use `required` members (C# 11) instead of `= null!`, and reserve the `!` operator for tests or proven cases. Pattern matching (`is not null`) and null-conditional assignment (C# 14) keep the code readable.",
+    "followups": [
+      "How does `required` differ from constructor parameters?",
+      "How do you model EF Core navigation properties under NRT?"
+    ],
+    "tags": ["nullable", "nrt"]
+  },
+  {
+    "id": "cs-003",
+    "topic": "csharp",
+    "difficulty": "core",
+    "question": "How do you use pattern matching and switch expressions in practice, and how would you model a Success/Failure result type idiomatically in C# today?",
+    "answer": "Type, property, positional, relational, list and `and`/`or`/`not` patterns let you replace cascaded ifs with exhaustive switch expressions over sealed hierarchies: `shape switch { Circle { Radius: > 0 } c => ..., Rectangle(var w, var h) => ..., _ => throw }`. The compiler warns about unreachable or missing cases, which is the maintainability win. For a result type, declare an abstract sealed-record hierarchy (`abstract record Result<T>; sealed record Ok<T>(T Value) : Result<T>; sealed record Error<T>(string Code) : Result<T>`) and switch over it, or use a library like OneOf; avoid exceptions for expected outcomes. Keep patterns shallow, nesting beyond two levels hurts readability.",
+    "followups": [
+      "What does C# lack compared with real discriminated unions, and what is proposed?",
+      "When does a guard (`when`) break exhaustiveness checking?"
+    ],
+    "tags": ["pattern-matching", "result-type"]
+  },
+  {
+    "id": "cs-004",
+    "topic": "csharp",
+    "difficulty": "core",
+    "question": "Deferred execution in LINQ: what goes wrong, and why should a repository never expose `IQueryable<T>`?",
+    "answer": "LINQ operators are lazy: the query re-executes on every enumeration, so iterating twice repeats the work and the side effects, and for EF it hits the database twice. Materialise once with `ToList`/`ToArray` when you iterate more than once or the source can change, and use `IReadOnlyList<T>` in signatures to signal materialised data. Other pitfalls: `Count()` on a non-collection enumerates everything, exceptions surface at enumeration rather than at creation, and iterator methods using `yield` do not validate arguments until iterated. Exposing `IQueryable<T>` from a repository leaks the provider: callers compose queries the repository cannot test or optimise, client evaluation sneaks in, and the database gets hit from the controller layer.",
+    "followups": [
+      "`IEnumerable<T>` versus `IReadOnlyCollection<T>` as a return type: what does each promise?",
+      "How do you detect multiple enumeration automatically?"
+    ],
+    "tags": ["linq", "deferred-execution"]
+  },
+  {
+    "id": "cs-005",
+    "topic": "csharp",
+    "difficulty": "senior",
+    "question": "Generics: constraints, variance, and static abstract interface members. Why is `List<Cat>` not a `List<Animal>` while `IEnumerable<Cat>` is an `IEnumerable<Animal>`?",
+    "answer": "Constraints (`where T : class`, `new()`, `notnull`, `unmanaged`, interface constraints) unlock members and let the JIT specialise code for struct `T` without boxing. Variance exists only on interfaces and delegates with reference types: `IEnumerable<out T>` is covariant because it only produces `T`, `Action<in T>` is contravariant because it only consumes `T`. `List<T>` both produces and consumes, so treating `List<Cat>` as `List<Animal>` would allow adding a `Dog`; that is exactly the unsoundness array covariance has at runtime. Static abstract interface members (C# 11, generic math `INumber<T>`) let you call operators and factories on `T`. Avoid reflection-based `MakeGenericType` and generic type explosion in hot paths.",
+    "followups": [
+      "Why is array covariance a runtime cost?",
+      "What is the difference between `default(T)` and `T?` when T is a struct?"
+    ],
+    "tags": ["generics", "variance"]
+  },
+  {
+    "id": "cs-006",
+    "topic": "csharp",
+    "difficulty": "senior",
+    "question": "Which recent C# features (C# 12 to 14) should a senior know, and what risk comes with primary constructors on classes?",
+    "answer": "Primary constructors on classes (C# 12) shrink DI-heavy classes, but the captured parameters are mutable fields, not readonly, and they double-capture if you also assign them to a field. Collection expressions `[1, 2, ..other]` and `params` collections including `params Span<T>` (C# 13). The `field` keyword for property backing and extension members in extension blocks (C# 14). The `Lock` type, `ref readonly` parameters and the `allows ref struct` anti-constraint for high-performance code. Source generators replace reflection for AOT: `[GeneratedRegex]`, `System.Text.Json` contexts, `[LoggerMessage]`. Be ready to say which .NET version you shipped on and why you did or did not adopt a feature.",
+    "followups": [
+      "How do you make a primary-constructor parameter effectively readonly?",
+      "What does `[LoggerMessage]` buy you over `logger.LogInformation(...)`?"
+    ],
+    "tags": ["language-features", "csharp-14"]
+  },
+  {
+    "id": "test-001",
+    "topic": "testing",
+    "difficulty": "senior",
+    "question": "Describe your testing strategy for a .NET service: what is unit tested, what is integration tested, what do you mock, and why avoid the EF InMemory provider?",
+    "answer": "Unit tests cover pure domain logic and algorithms with no I/O. Integration tests go through `WebApplicationFactory`, exercising real middleware, routing, validation and auth against a real database in Testcontainers, because the EF InMemory provider ignores constraints, transactions, SQL translation and case sensitivity and therefore lies. A thin layer of contract or end-to-end tests covers the critical paths. Mock only at external boundaries: HTTP through a fake `HttpMessageHandler` or WireMock, time through `TimeProvider` and `FakeTimeProvider`, randomness through an injected `Random`; do not mock the `DbContext`. Test behaviour through public APIs, keep tests deterministic and parallel-safe with an isolated database per test collection.",
+    "followups": [
+      "How do you test a `BackgroundService` without `Task.Delay` in the test?",
+      "What belongs in a contract test between two services?"
+    ],
+    "tags": ["strategy", "testcontainers", "webapplicationfactory"]
+  },
+  {
+    "id": "test-002",
+    "topic": "testing",
+    "difficulty": "senior",
+    "question": "What causes flaky tests, and how do you eliminate them rather than retry them?",
+    "answer": "Shared mutable state between parallel tests, real clocks (`DateTime.Now`, `Task.Delay` used as synchronisation), order dependence, real network and ports, culture and time-zone dependence in assertions, async code that is not awaited, and retries that hide actual bugs. Fixes: inject `TimeProvider` and advance a `FakeTimeProvider` instead of sleeping, isolate state per test with fresh fixtures or schemas, synchronise on signals such as `TaskCompletionSource` rather than delays, assert with `CultureInfo.InvariantCulture`, control xUnit parallelisation deliberately, and quarantine then fix flaky tests. A `[Retry]` attribute as policy only converts a visible failure into an invisible one.",
+    "followups": [
+      "How do you test a scheduler that fires at random times inside a window?",
+      "What is the difference between a slow test and a flaky one, operationally?"
+    ],
+    "tags": ["flaky", "determinism", "timeprovider"]
+  },
+  {
+    "id": "test-003",
+    "topic": "testing",
+    "difficulty": "core",
+    "question": "Mocks, stubs and fakes: what is the difference, and what is the cost of over-mocking?",
+    "answer": "A stub returns canned data, a mock verifies interactions, a fake is a lightweight working implementation such as an in-memory repository or a fake clock. Over-mocking, a substitute for every dependency, couples tests to implementation details: refactors break tests without catching bugs, and the suite becomes a maintenance tax that nobody trusts. Prefer fakes at the boundaries and real objects inside, verify outcomes (state, responses, persisted rows) rather than calls, and reserve mocks for side-effect-only collaborators like an email sender. Architecture tests (NetArchTest, ArchUnitNET) protect layering better than mocking every seam.",
+    "followups": [
+      "How would you test a class that depends on `IServiceScopeFactory`? (build a real `ServiceCollection` in the test)",
+      "When is verifying a call the right assertion?"
+    ],
+    "tags": ["mocks", "fakes"]
+  }
+]

@@ -1,0 +1,170 @@
+[
+  {
+    "id": "dist-001",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "What is idempotency, why does every write endpoint and every message consumer need to think about it, and how do you implement it?",
+    "answer": "Retries from clients, load balancers and message redelivery mean any write can arrive twice; idempotency guarantees the second attempt has no additional effect. For HTTP commands accept an `Idempotency-Key` header, store key plus the response in the same transaction as the write, and return the stored response on replay; reject a replay whose payload differs with 409. For consumers keep a processed-messages table keyed by message id with a unique constraint, or make the operation naturally idempotent (set balance to X, upsert). Scope keys per client or user, give them a TTL, and rely on the unique constraint rather than check-then-insert, because concurrent duplicates arrive at the same millisecond.",
+    "followups": [
+      "Where does exactly-once delivery actually exist, if anywhere?",
+      "How does the outbox pattern relate to duplicates?"
+    ],
+    "tags": ["idempotency", "retries"]
+  },
+  {
+    "id": "dist-002",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Explain the dual-write problem and the outbox pattern, including its trade-offs.",
+    "answer": "Saving to the database and publishing to a broker are two systems; a crash between the two loses the event or publishes it without the state change. The outbox writes the event into an `Outbox` table inside the same local transaction as the state change, and a relay (polling publisher or change-data-capture such as Debezium) publishes the rows and marks them sent. Delivery becomes at-least-once, so consumers need an inbox or idempotent handling. Trade-offs: relay latency and polling load, table growth that needs purging, ordering guarantees only per aggregate or partition, and the relay as a component you must monitor. MassTransit, Wolverine and NServiceBus implement it; 'publish then save' is worse than 'save then publish' because it announces a change that may never happen.",
+    "followups": [
+      "How do you preserve per-aggregate ordering through the relay?",
+      "Why is CDC-based relaying sometimes preferred over polling?"
+    ],
+    "tags": ["outbox", "messaging"]
+  },
+  {
+    "id": "dist-003",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Sagas: choreography versus orchestration, compensations, and when you would still reach for a distributed transaction.",
+    "answer": "Two-phase commit across services locks resources and couples availability, so long-running workflows are modelled as sagas: a sequence of local transactions with compensating actions. Choreography has services react to each other's events, which is simple for two or three steps but makes the flow implicit and hard to observe. Orchestration uses a coordinator state machine that sends commands and tracks state, which is explicit and testable and handles timeouts better once there are four or more steps. Compensations are business operations (refund, release reservation), not rollbacks; some actions cannot be compensated (an email sent) so put them last. Tooling: MassTransit state machines, Temporal, Durable Functions. A real distributed transaction is justified only within one trust boundary with a coordinator you control, and rarely even then.",
+    "followups": [
+      "How do you test a saga including its timeouts?",
+      "What is a semantic lock and when do you need one?"
+    ],
+    "tags": ["saga", "consistency"]
+  },
+  {
+    "id": "dist-004",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Design the resilience policy for outbound calls from a .NET service: timeouts, retries, backoff, jitter, circuit breaker, bulkhead. Why can retries cause an outage?",
+    "answer": "Timeouts first: every outbound call needs one, shorter than the caller's own deadline. Retry only transient failures (timeouts, 5xx, 429 honouring Retry-After), a small number of times, with exponential backoff plus jitter so thousands of clients do not retry in lockstep, and never retry non-idempotent operations without an idempotency key. A circuit breaker stops hammering a dependency that is failing, fails fast, and probes in half-open state so it can recover. Bulkheads cap concurrency per dependency so one slow service cannot exhaust connections or the thread pool. Retries multiply load on an already struggling dependency, which is how a slow database becomes a full outage; retry budgets and the breaker exist to stop that amplification. In .NET: `Microsoft.Extensions.Http.Resilience` and Polly v8 pipelines.",
+    "followups": [
+      "How do you pick breaker thresholds without guessing?",
+      "What is a retry budget and how would you implement one?"
+    ],
+    "tags": ["resilience", "polly"]
+  },
+  {
+    "id": "dist-005",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Messaging semantics: at-least-once versus at-most-once, ordering, poison messages, and Azure Service Bus versus Kafka.",
+    "answer": "Brokers deliver at-least-once when the consumer acknowledges after processing and at-most-once when it acknowledges before; exactly-once is an end-to-end property built from idempotent consumers and deduplication, not a broker feature. Ordering exists only within a partition or a session: Kafka orders per partition, Service Bus per session; global ordering does not scale. Poison messages get bounded retries, then a dead-letter queue with alerting and a replay tool. Service Bus (queues, topics, sessions, scheduled messages, duplicate detection, transactions, DLQ) suits commands and enterprise workflows; Kafka or Event Hubs (an append-only log with consumer groups, replay by offset and very high throughput) suits streaming and event sourcing. Evolve schemas additively and version contracts.",
+    "followups": [
+      "How do you handle a message that depends on another arriving first?",
+      "Competing consumers with ordering: how do sessions or partition keys solve it?"
+    ],
+    "tags": ["messaging", "kafka", "servicebus"]
+  },
+  {
+    "id": "dist-006",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Observability for a .NET system: logs, metrics and traces, OpenTelemetry, and how context propagates through a queue.",
+    "answer": "Structured logs with a correlation id from the current trace via `ILogger` scopes; metrics through `System.Diagnostics.Metrics` following RED (rate, errors, duration) for services and USE for resources; distributed traces through `ActivitySource` exported by OpenTelemetry to Jaeger, Tempo or Azure Monitor. ASP.NET Core, HttpClient, EF Core and messaging libraries carry built-in instrumentation, and the W3C `traceparent` header propagates across HTTP automatically; for queues you copy it into message headers on publish and start a child activity on consume, which is how a `BackgroundService` consumer joins the trace. Alert on symptoms (error rate, latency p99 against an SLO), not causes; sample traces on high-volume paths; keep PII out of logs.",
+    "followups": [
+      "What are exemplars and why do they matter?",
+      "How do you keep log volume and cost under control without losing the signal?"
+    ],
+    "tags": ["observability", "opentelemetry"]
+  },
+  {
+    "id": "dist-007",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Modular monolith versus microservices, and when you would not use CQRS or event sourcing. Critique Clean Architecture.",
+    "answer": "Start with a modular monolith: clear module boundaries (separate schemas and assemblies, communication through interfaces or in-process events), one deployment, and a real transaction when you need one. Extract a module into a service only for an actual reason: independent scaling, team autonomy, different runtime requirements, or isolating a risky dependency. CQRS pays off when read shapes are complex or reads scale very differently from writes; by default it doubles the models and introduces eventual consistency for nothing, and event sourcing adds projections, versioning and replay tooling on top. Clean or onion layering is fine until it becomes ceremony: a CRUD-heavy service often reads better as vertical slices with a thin shared kernel. The senior signal is saying when not to use a pattern.",
+    "followups": [
+      "How do you enforce module boundaries inside one solution?",
+      "What is a sign you split into services too early?"
+    ],
+    "tags": ["architecture", "cqrs", "modular-monolith"]
+  },
+  {
+    "id": "dist-008",
+    "topic": "distributed",
+    "difficulty": "senior",
+    "question": "Caching in a distributed system: strategies, consistency problems and the failure modes you design for.",
+    "answer": "Cache-aside (read on miss, invalidate on write) is the default; write-through and write-behind trade latency and durability for consistency. The hard problems are invalidation, where stale reads after writes are handled with versioned keys, short TTLs or event-driven invalidation; stampedes when a hot key expires, handled with single-flight locking, probabilistic early refresh or HybridCache; hot partitions and large values on one Redis shard; and tenant isolation, never caching per-user data under a shared key. Choose TTLs from the business tolerance for staleness, cache serialized DTOs rather than entities, and measure hit ratio and p99 impact, because a cache without metrics is a liability rather than an optimisation.",
+    "followups": [
+      "What does read-your-own-writes require from the cache design?",
+      "Redis cluster versus a single node for a cache: what changes?"
+    ],
+    "tags": ["caching", "redis"]
+  },
+  {
+    "id": "design-001",
+    "topic": "design",
+    "difficulty": "deep",
+    "question": "System design exercise (45 min): a payment processing API that must never double-charge, where calls to the payment provider can time out. Outline the design.",
+    "answer": "Requirements: create, authorize, capture, refund; never double-charge; provider timeouts are normal. Design: an idempotency key per client request stored with the payment aggregate; a payment state machine (Pending, Authorized, Captured, Failed, Refunded) persisted with optimistic concurrency; provider calls with strict timeouts and our own reference id, so on timeout we query the provider by reference before deciding to retry; outbox for PaymentCaptured events; a reconciliation job comparing provider settlement reports with an immutable double-entry ledger; tokenization so card data never touches our systems (PCI scope); observability on every state transition. Trade-offs to voice: consistency over availability for money, retries only with keys, audit trail as a first-class table, multi-currency and rounding rules.",
+    "followups": [
+      "What happens if the provider captured but our write failed afterwards?",
+      "How do you shard payments if volume grows tenfold?"
+    ],
+    "tags": ["system-design", "payments"]
+  },
+  {
+    "id": "design-002",
+    "topic": "design",
+    "difficulty": "deep",
+    "question": "System design exercise (45 min): a notification system (email, SMS, push) with user preferences, templates, retries and provider failover. Outline the design.",
+    "answer": "Ingest domain events into a notification service that decides channels from user preferences and quiet hours; per-channel queues with provider adapters behind an interface; versioned templates rendered at send time; delivery status callbacks persisted per attempt; retries with backoff and dead-letter queues; deduplication on event id plus user plus channel so a replay never sends twice; rate limits per user and per provider, with batching into digests for noisy events; provider failover by health signals. Scale by partitioning queues on user id, keep sends idempotent, store minimal PII with retention and opt-out handling for GDPR, and expose metrics for sent, delivered, bounced and latency per provider.",
+    "followups": [
+      "How do you guarantee an OTP SMS is not delayed behind marketing traffic?",
+      "How do you test a new template without spamming real users?"
+    ],
+    "tags": ["system-design", "notifications"]
+  },
+  {
+    "id": "design-003",
+    "topic": "design",
+    "difficulty": "deep",
+    "question": "System design exercise (45 min): a real-time leaderboard for a multiplayer game with write-heavy score updates, top-N and rank-around-me queries. Outline the design.",
+    "answer": "Redis sorted sets per leaderboard and season give O(log N) score updates and rank queries: ZADD for scores, ZREVRANGE for top-N, ZREVRANK for a player's rank, ZREVRANGEBYSCORE for around-me windows. The write path validates scores server-side for anti-cheat, updates Redis, and publishes to a queue that persists history to SQL asynchronously. The read path serves a cached top-100 with a short TTL and per-player rank on demand, with SignalR or WebSockets pushing throttled live updates. Shard by leaderboard or season to avoid hot keys, archive seasons on reset, and run Redis with AOF persistence and replicas for failover. Consistency: Redis is authoritative in-season, SQL is eventually consistent history.",
+    "followups": [
+      "How do you handle ties fairly?",
+      "What happens to the leaderboard if Redis loses the last minute of writes?"
+    ],
+    "tags": ["system-design", "gaming", "redis"]
+  },
+  {
+    "id": "az-001",
+    "topic": "azure",
+    "difficulty": "senior",
+    "question": "Azure Service Bus versus Storage Queues versus Event Hubs versus Event Grid: how do you choose?",
+    "answer": "Storage Queues: cheap and simple, huge volume, 64 KB messages, visibility-timeout semantics, no ordering or sessions. Service Bus: enterprise messaging with topics and subscriptions, sessions for FIFO, dead-lettering, scheduled messages, duplicate detection and transactions, the choice for commands and workflows. Event Hubs: a partitioned event log for telemetry and streaming at very high throughput, consumer groups, replay by offset, Kafka-compatible endpoint. Event Grid: push delivery of discrete events (blob created, custom events) to handlers with filtering, an eventing fabric rather than a queue. Decide on commands versus events, ordering needs, throughput, replay requirements and cost.",
+    "followups": [
+      "How do you get ordering with competing consumers on Service Bus?",
+      "What does duplicate detection cost and how long is the window?"
+    ],
+    "tags": ["azure", "messaging"]
+  },
+  {
+    "id": "az-002",
+    "topic": "azure",
+    "difficulty": "senior",
+    "question": "App Service versus Container Apps versus AKS versus Functions for a .NET API: how do you choose, and how do you deploy without downtime?",
+    "answer": "App Service is PaaS for web apps and APIs with deployment slots, easy scaling and little operations work, the default for a .NET API. Container Apps runs containers on managed Kubernetes with KEDA scaling to zero, revisions and Dapr, good for microservices without running a cluster. AKS is full Kubernetes for teams that need control over networking and many services and have a platform team. Functions are event-driven with bindings and pay-per-execution, with cold starts and execution limits, best in the isolated worker model. Zero downtime: slots with warm-up and swap on App Service, revision traffic splitting on Container Apps, rolling updates with readiness probes on AKS. Pick the least operational burden that meets the requirement.",
+    "followups": [
+      "When do Functions consumption-plan limits bite?",
+      "How do you run database migrations in a slot-swap deployment?"
+    ],
+    "tags": ["azure", "compute"]
+  },
+  {
+    "id": "az-003",
+    "topic": "azure",
+    "difficulty": "senior",
+    "question": "Managed identity, Key Vault and App Configuration: how do you remove secrets from a .NET deployment, and how do you protect an API with Entra ID?",
+    "answer": "Give the app a managed identity so it can reach Key Vault, Storage, Service Bus and Azure SQL (`Authentication=Active Directory Default`) without any secret in configuration, using `DefaultAzureCredential`, which works with the developer's login locally and the managed identity in Azure. Key Vault holds the remaining secrets and certificates with RBAC and audit logs, loaded through the Key Vault configuration provider or Key Vault references in App Service settings. App Configuration centralizes settings and feature flags with refresh. Protect the API with Entra ID as JWT bearer, authorizing on app roles and scopes, rotate what cannot be removed, and treat a connection string with a password in appsettings as a defect.",
+    "followups": [
+      "What are the trade-offs of the `DefaultAzureCredential` chain in production?",
+      "How do you grant a managed identity access to a SQL database?"
+    ],
+    "tags": ["azure", "identity", "keyvault"]
+  }
+]

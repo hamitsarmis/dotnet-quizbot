@@ -1,0 +1,14 @@
+# Never send secrets or runtime data into the build context.
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+
+**/bin/
+**/obj/
+**/TestResults/
+.git/
+.vs/
+.vscode/
+.idea/

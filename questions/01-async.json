@@ -1,0 +1,152 @@
+[
+  {
+    "id": "async-001",
+    "topic": "async",
+    "difficulty": "core",
+    "question": "Walk me through what happens when the compiler encounters an `await` in a method. What does it generate, what happens to the thread that was running the method, and where does execution resume once the awaited operation completes?",
+    "answer": "The compiler rewrites the method body into a state machine (a struct in Release builds) implementing `IAsyncStateMachine`. Locals and parameters become fields, the body moves into `MoveNext()` with a switch on a state field, and an `AsyncTaskMethodBuilder` produces the Task that is returned to the caller. At each `await` the generated code checks the awaiter's `IsCompleted`: if true it continues synchronously; if false it saves the state, registers `MoveNext` as the continuation via `AwaitUnsafeOnCompleted`, and returns to the caller. The thread simply returns: a UI thread goes back to its message loop, a pool thread goes back to the pool. When the operation completes, the continuation runs wherever the captured `SynchronizationContext` or `TaskScheduler` posts it, or on the completing thread if nothing was captured.",
+    "followups": [
+      "Why is the state machine a struct in Release builds? When does it get boxed?",
+      "What does 'there is no thread' mean for an I/O-bound await?",
+      "What does `AsyncTaskMethodBuilder` do with an exception thrown inside `MoveNext`?"
+    ],
+    "tags": ["compiler", "state-machine"]
+  },
+  {
+    "id": "async-002",
+    "topic": "async",
+    "difficulty": "core",
+    "question": "WPF: a click handler calls `GetDataAsync().Result`, and `GetDataAsync` awaits `HttpClient.GetStringAsync` then trims the result. What happens when the button is clicked, step by step? What is the smallest fix, is there a second different fix, and which one would you ship?",
+    "answer": "`.Result` blocks the UI thread. Inside `GetDataAsync` the `await` captured the `DispatcherSynchronizationContext`, so when the HTTP call completes on a pool thread the continuation is posted to the dispatcher queue. Only the UI thread can run that queue, and it is blocked waiting for a Task that cannot complete until the continuation runs: a circular wait, so the app hangs forever, not for 300 ms. Fix 1: make the handler `async void` and `await` the call; event handlers are the one accepted `async void` case, and the body should be wrapped in try/catch. Fix 2: `ConfigureAwait(false)` on every await inside `GetDataAsync`, so continuations run on the pool, the Task completes and `.Result` returns, but the UI is still frozen for the duration. Ship fix 1 and treat `ConfigureAwait(false)` as hygiene for library code. Making `GetDataAsync` synchronous throws the whole benefit away.",
+    "followups": [
+      "Why does the same code also deadlock in classic ASP.NET but not in a console app?",
+      "What happens if only one of three awaits inside the chain has `ConfigureAwait(false)`?",
+      "How would you detect this class of bug in code review or with an analyzer?"
+    ],
+    "tags": ["wpf", "deadlock", "synchronizationcontext"]
+  },
+  {
+    "id": "async-003",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "In an ASP.NET Core API, is there a `SynchronizationContext` at all? And does `ConfigureAwait(false)` still have any place in a .NET backend codebase, or is it just noise there?",
+    "answer": "No. ASP.NET Core removed the request `SynchronizationContext`; classic ASP.NET had `AspNetSynchronizationContext`, which flowed `HttpContext.Current` and could deadlock on `.Result`. In ASP.NET Core application code `ConfigureAwait(false)` is therefore a no-op: continuations already run on pool threads. It still matters in reusable library code, because the library may be consumed from WPF, WinForms, MAUI, Blazor Server (which has a renderer `SynchronizationContext`) or legacy ASP.NET, and it skips a small context check. The rule: application code in ASP.NET Core, skip it; shared libraries, always use it.",
+    "followups": [
+      "How is `HttpContext` made available without a sync context? (`IHttpContextAccessor` on `AsyncLocal`)",
+      "Where in a WPF code base must you NOT use `ConfigureAwait(false)`?",
+      "What does `ConfigureAwait(ConfigureAwaitOptions.ForceYielding)` do (.NET 8)?"
+    ],
+    "tags": ["aspnetcore", "configureawait"]
+  },
+  {
+    "id": "async-004",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "Code review: a controller does `var order = await Task.Run(() => _repo.GetOrderById(id));` where the repository method is a synchronous EF query, and the author says he did it to make the endpoint async. What does this code cost under load compared to calling the repository synchronously? Better, worse or the same?",
+    "answer": "Nothing is gained. The request thread returns to the pool at the await, but a second pool thread blocks on the synchronous query, so the number of blocked threads at any moment is the same as the plain synchronous call. On top of that you pay for scheduling a work item, a context switch and, under bursts, the thread-pool injection delay. This is 'async over sync': the signature looks asynchronous but scalability is unchanged or slightly worse. Real benefit only comes from true asynchronous I/O (`FirstOrDefaultAsync`), where the ADO.NET driver uses asynchronous network I/O and no thread waits on the database. `Task.Run` belongs to CPU-bound work in UI applications, not to server request paths. The review comment should say exactly that, in one paragraph, rather than just 'use the async method'.",
+    "followups": [
+      "When is `Task.Run` legitimate inside an ASP.NET Core request?",
+      "Define 'sync over async' and explain why it is worse than 'async over sync'.",
+      "How would you measure whether an endpoint actually scales after the change?"
+    ],
+    "tags": ["aspnetcore", "task-run", "code-review"]
+  },
+  {
+    "id": "async-005",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "Explain thread-pool starvation. How does it happen in an ASP.NET Core application, what do you observe, and how do you diagnose and fix it?",
+    "answer": "Starvation occurs when pool threads are blocked (sync over async: `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, lock waits around I/O) so no free thread is available to run queued work, including the continuations that would unblock the blocked threads. The pool injects new threads slowly, roughly a couple per second past the minimum, so latency spikes, requests queue up and throughput collapses while CPU stays low. In `dotnet-counters` you see ThreadPool Queue Length rising and Thread Count climbing with low CPU; a dump or `dotnet-stack` shows many threads in `Monitor.Wait` or `Task.Wait`. The fix is removing the blocking calls, not raising `ThreadPool.SetMinThreads`, which only delays the collapse and hides the bug.",
+    "followups": [
+      "Why does the pool not just create threads faster? What is the hill-climbing heuristic trying to protect?",
+      "What did .NET 6 change about blocking detection in the thread pool?"
+    ],
+    "tags": ["threadpool", "starvation", "diagnostics"]
+  },
+  {
+    "id": "async-006",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "`ValueTask` versus `Task`: when do you use each, and what rules apply to `ValueTask` that do not apply to `Task`?",
+    "answer": "`Task` is a reference type allocated per call. `ValueTask<T>` is a struct that wraps either an already-available result or an underlying `Task`/`IValueTaskSource`, which avoids an allocation when the operation usually completes synchronously, such as cache hits or buffered reads. Use it on hot paths where synchronous completion dominates and the API is worth optimizing; otherwise default to `Task`, which is simpler and safer. Rules: await a `ValueTask` only once, never read `.Result` before it completes, never await it concurrently or store it for later, and call `.AsTask()` when you need Task semantics. Breaking these rules with pooled `IValueTaskSource` implementations gives undefined behaviour because the backing object may be reused.",
+    "followups": [
+      "Why does the non-generic `ValueTask` exist?",
+      "What does `IValueTaskSource` enable that `Task` cannot?",
+      "Should a public interface in your codebase return `ValueTask`? Argue both ways."
+    ],
+    "tags": ["valuetask", "performance"]
+  },
+  {
+    "id": "async-007",
+    "topic": "async",
+    "difficulty": "core",
+    "question": "What is wrong with `async void`, and when is it acceptable?",
+    "answer": "An `async void` method returns to the caller before its work finishes and gives back no Task, so the caller cannot await it, compose it, observe its completion or test it. Exceptions cannot be caught by the caller: they are thrown on the captured `SynchronizationContext` (crashing a WPF application) or, without one, surface as unhandled on the thread pool. The only legitimate use is event handlers whose signature is fixed, like `void Button_Click`, and even there the body should be wrapped in try/catch and delegate to an `async Task` method that can be tested. For fire-and-forget work use an explicit helper that awaits and logs, or a background queue, never `async void`.",
+    "followups": [
+      "How do you unit-test the logic behind an `async void` event handler?",
+      "What does `async Task` cost compared to `async void` in an event handler?"
+    ],
+    "tags": ["async-void", "exceptions"]
+  },
+  {
+    "id": "async-008",
+    "topic": "async",
+    "difficulty": "core",
+    "question": "How should `CancellationToken` flow through an ASP.NET Core service? What does `ThrowIfCancellationRequested` do, and how do you combine a timeout with request cancellation?",
+    "answer": "Accept a `CancellationToken` as the last parameter of every async method and pass it to every awaited I/O call. Cancellation is cooperative: nothing stops unless the callee checks the token or registers a callback, so CPU-bound loops must call `ThrowIfCancellationRequested()` periodically. In ASP.NET Core, `HttpContext.RequestAborted` is bound automatically to a `CancellationToken` parameter and fires when the client disconnects, so wasted work stops early. Combine with a timeout via `CancellationTokenSource.CreateLinkedTokenSource(requestToken)` plus `CancelAfter`, and dispose the source. Treat `OperationCanceledException` as a normal outcome: catch it at the boundary and do not log it as an error.",
+    "followups": [
+      "What status code should a request cancelled by the client produce, if any?",
+      "What are the risks of cancelling in the middle of a database transaction?",
+      "Why should you avoid `CancellationToken.None` in library code?"
+    ],
+    "tags": ["cancellation"]
+  },
+  {
+    "id": "async-009",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "How does `Task.WhenAll` behave when several tasks fail? What are the common pitfalls of fan-out with `WhenAll` and `WhenAny`?",
+    "answer": "`WhenAll` completes when all inputs complete. If several fault, awaiting it throws only the first exception, while the returned task's `.Exception` is an `AggregateException` holding all of them, so keep the task in a variable, await it in a try block and inspect `task.Exception` or the individual tasks in the catch. Pitfalls: unbounded fan-out that floods a dependency (bound it with `SemaphoreSlim` or `Parallel.ForEachAsync` with a max degree of parallelism), one failure not cancelling the others (link a `CancellationTokenSource`), and losing partial results. `WhenAny` is for first-wins and timeouts, but the losing tasks must still be observed or their exceptions become unobserved. For timeouts prefer `task.WaitAsync(timeout)` from .NET 6.",
+    "followups": [
+      "How do you implement a timeout without leaking the underlying operation?",
+      "What does `Task.WhenEach` (.NET 9) give you over a `WhenAny` loop?"
+    ],
+    "tags": ["whenall", "exceptions", "fan-out"]
+  },
+  {
+    "id": "async-010",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "`IAsyncEnumerable<T>` versus `System.Threading.Channels`: when would you choose each?",
+    "answer": "`IAsyncEnumerable<T>` streams results from a single producer to a single consumer with natural backpressure through `await foreach`; it fits paging through a database or API, or streaming rows to an HTTP response, which ASP.NET Core serialises incrementally. `Channel<T>` is a thread-safe in-memory queue with bounded or unbounded modes for producer-consumer pipelines where producers and consumers run concurrently and you need a policy when the queue is full: wait, drop oldest or drop newest. Rule of thumb: a pull-based stream is an `IAsyncEnumerable`; decoupled concurrent stages are a `Channel`. Both support cancellation, the former via the `[EnumeratorCancellation]` attribute on the token parameter.",
+    "followups": [
+      "How do you prevent unbounded memory growth with a Channel?",
+      "What happens to the producer when the consumer stops reading an `IAsyncEnumerable` halfway through?"
+    ],
+    "tags": ["iasyncenumerable", "channels", "streaming"]
+  },
+  {
+    "id": "async-011",
+    "topic": "async",
+    "difficulty": "senior",
+    "question": "Why can you not `await` inside a `lock` block, and what do you use for mutual exclusion in async code?",
+    "answer": "`lock` uses `Monitor`, which is thread-affine: the thread that acquires must release. After an `await` the continuation may run on a different thread, so the release would fail, and the compiler forbids `await` inside `lock`. For async mutual exclusion use `SemaphoreSlim(1, 1)` with `WaitAsync` and `Release` in try/finally, keep the critical section short and never hold it across I/O you do not control. Prefer designs that avoid the lock: a single-writer loop fed by a `Channel`, `ConcurrentDictionary.GetOrAdd` with `Lazy<Task<T>>` for cache-fill, or immutable snapshots. `SemaphoreSlim` is not re-entrant, so a method that awaits itself under the semaphore deadlocks. The .NET 9 `Lock` type is still synchronous.",
+    "followups": [
+      "What is the difference between `SemaphoreSlim` and `Semaphore`?",
+      "Why is `async` inside `Parallel.ForEach` a bug, and what replaces it?"
+    ],
+    "tags": ["locking", "semaphoreslim"]
+  },
+  {
+    "id": "async-012",
+    "topic": "async",
+    "difficulty": "deep",
+    "question": "What happens to an exception from a Task that nobody awaits? How do you handle fire-and-forget safely in ASP.NET Core?",
+    "answer": "A faulted Task whose exception is never observed (awaited, waited on, or `.Exception` read) raises `TaskScheduler.UnobservedTaskException` when the Task is finalized. Since .NET 4.5 that no longer crashes the process, so the failure disappears silently; `_ = DoAsync();` is the usual source. Mitigation: a `SafeFireAndForget(this Task, ILogger)` extension that awaits and logs, a hosted background queue (`Channel` + `BackgroundService`) for work that outlives the request, and `UnobservedTaskException` wired to logging as a safety net. In ASP.NET Core never start work that outlives the request from the request itself: the DI scope and `HttpContext` are disposed when the response ends, so the background work observes disposed objects.",
+    "followups": [
+      "Why is capturing `HttpContext` in a background task dangerous even if the task finishes quickly?",
+      "How do you test that a fire-and-forget helper actually logs the exception?"
+    ],
+    "tags": ["unobserved-exceptions", "fire-and-forget", "backgroundservice"]
+  }
+]

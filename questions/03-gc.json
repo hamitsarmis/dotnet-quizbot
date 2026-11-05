@@ -1,0 +1,124 @@
+[
+  {
+    "id": "gc-001",
+    "topic": "gc",
+    "difficulty": "core",
+    "question": "Why is the .NET GC generational at all? What empirical assumption is it built on, and what would go wrong with a single flat heap?",
+    "answer": "It rests on the generational hypothesis: most objects die young, and objects that survive a few collections tend to live for a long time. So the collector collects Gen0 very often and cheaply (only the young region, using card tables and write barriers to find references from old objects into young ones), promotes survivors to Gen1 and then Gen2, and collects Gen2 rarely. With one flat heap every collection would have to mark and sweep or compact the entire heap, so pause times would scale with total live memory rather than with recent allocation, which is unacceptable for interactive applications and servers. The price is the write barrier on every reference store and the cost of objects that die right after promotion.",
+    "followups": [
+      "What is a card table and why is it needed?",
+      "Why is the Gen0 budget sized relative to the processor cache?",
+      "What does 'mid-life crisis' mean for a cache that holds objects for a few seconds?"
+    ],
+    "tags": ["generations"]
+  },
+  {
+    "id": "gc-002",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "A video pipeline allocates a fresh 6 MB `byte[]` per 1080p frame at 60 fps. Where does that array land in the managed heap, when and how is it collected, and what would you observe in the running app and in a profiler after a few minutes?",
+    "answer": "Any object of 85,000 bytes or more goes to the Large Object Heap, which is collected only together with Gen2 and is swept rather than compacted by default. Allocating 6 MB sixty times a second, roughly 360 MB/s, exceeds the LOH budget constantly, which triggers frequent Gen2 collections, the most expensive kind, and the freed slots fragment because later arrays may not fit them. The user sees periodic stutters and dropped frames aligned with GC pauses, and a working set growing in a sawtooth into hundreds of megabytes. In `dotnet-counters`: Gen 2 GC Count climbing fast, % Time in GC high, LOH Size large, Allocation Rate around 360 MB/s. In PerfView the GCStats view shows the pauses lining up with the stutters.",
+    "followups": [
+      "Why does the runtime not simply place large arrays in Gen0?",
+      "What does `GCSettings.LargeObjectHeapCompactionMode` do, and why not set it every frame?",
+      "How would this behave differently under Server GC?"
+    ],
+    "tags": ["loh", "gen2", "video"]
+  },
+  {
+    "id": "gc-003",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "How do you fix the per-frame allocation? Explain the mechanism, not just 'pooling'. Then name the gotchas of `ArrayPool<byte>.Shared`: maximum pooled array size across runtimes, what `Rent(n)` guarantees about the length, and the classic ownership bug.",
+    "answer": "Reuse a fixed set of buffers so the steady state allocates nothing: a small ring of pre-allocated frame buffers (or unmanaged memory) handed out and returned turns 360 MB/s of garbage into zero and makes Gen2 collections rare again. Gotchas: before .NET 6 the shared pool refused arrays over 1 MB, so `Rent` allocated a fresh array and `Return` dropped it, meaning 6 MB frames were never pooled on .NET Framework or .NET Core 3.1; create your own pool there with `ArrayPool<byte>.Create(maxArrayLength, maxArraysPerBucket)`. `Rent(n)` returns an array at least n long, often longer, so carry the real length as a `Memory<byte>` slice instead of using `.Length`. The ownership bug: a consumer on another thread still reading a buffer after it was returned, so the next renter overwrites it and you get silent frame corruption. Clear on return only if the data is sensitive.",
+    "followups": [
+      "Would `IMemoryOwner<byte>` and `MemoryPool<byte>` make the ownership clearer? How?",
+      "How do you detect use-after-return in tests?"
+    ],
+    "tags": ["arraypool", "pooling"]
+  },
+  {
+    "id": "gc-004",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "In EmguCV you mostly hold `Mat` objects, not `byte[]`. Where do the pixels actually live, does the GC see those 6 MB, and what happens to the process if a developer forgets to `Dispose` a `Mat` in a hot loop?",
+    "answer": "`Mat` is a thin managed wrapper over native OpenCV memory: the pixel buffer is allocated on the C++ side, so the GC sees only a small object and knows nothing about the 6 MB behind it. Forgetting `Dispose` in a hot loop therefore leaks native memory without making collections more frequent, because managed pressure stays low; the working set climbs until the finalizers eventually run, far too late and on a single finalizer thread, or the process is killed by the OS or the container. Defences: deterministic `using`, `GC.AddMemoryPressure` and `RemoveMemoryPressure` so the GC accounts for the native size, `SafeHandle`-based wrappers, reusing Mats across frames, and monitoring working set against managed heap size, because a widening gap between them is the signature of a native leak.",
+    "followups": [
+      "Why does a finalizer not save you here?",
+      "How would you prove the leak is native and not managed, with which tools?"
+    ],
+    "tags": ["native-memory", "emgucv", "dispose"]
+  },
+  {
+    "id": "gc-005",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "Workstation GC versus Server GC, and concurrent (background) GC: how do they differ and when do you choose each? What changes inside a container?",
+    "answer": "Workstation GC uses one heap and runs collections on the allocating thread, with background GC letting Gen2 marking proceed while the application runs; it is tuned for responsiveness in client applications. Server GC creates one heap and one dedicated GC thread per logical core and collects in parallel, giving higher throughput and larger Gen0 budgets at the cost of more memory and poor behaviour when many processes share a machine. ASP.NET Core projects default to Server GC when more than one core is available; on a single core it falls back to Workstation. In containers the GC reads the cgroup limits: the heap hard limit defaults to 75 percent of the container memory limit, and Server GC with a small CPU quota can waste memory on many heaps, so set `DOTNET_gcServer`, `GCHeapCount` or `GCHeapHardLimit` deliberately.",
+    "followups": [
+      "What is `DOTNET_GCConserveMemory` for?",
+      "Why can Server GC in a 256 MB container be worse than Workstation?"
+    ],
+    "tags": ["server-gc", "containers"]
+  },
+  {
+    "id": "gc-006",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "`Span<T>`, `Memory<T>` and `stackalloc`: what are they, what problems do they solve, and what are their limits?",
+    "answer": "`Span<T>` is a ref struct holding a pointer and a length over any contiguous memory (array, stack, native), so you can slice and parse without copying or allocating. Being stack-only it cannot be a field of a class, cannot be boxed and cannot live across an `await`. `Memory<T>` is the heap-storable counterpart used with async APIs and `IMemoryOwner<T>`; you take `.Span` inside synchronous code. `stackalloc` allocates on the stack; keep it small, around a kilobyte, and guard with a size check that falls back to `ArrayPool`. Typical wins: parsing text and binary protocols, avoiding `Substring` and `ToArray` churn, and using the span-based BCL overloads such as `int.Parse(ReadOnlySpan<char>)`.",
+    "followups": [
+      "Why exactly can a `Span<T>` not cross an `await`?",
+      "What is `ReadOnlySequence<T>` and where does it show up?"
+    ],
+    "tags": ["span", "memory", "stackalloc"]
+  },
+  {
+    "id": "gc-007",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "Name the common sources of managed memory leaks in .NET applications and explain how you find them.",
+    "answer": "Event handlers that subscribe a short-lived object to a long-lived publisher (static events, singletons) keep the subscriber alive; static caches and dictionaries without eviction; timers (`System.Threading.Timer`, `DispatcherTimer`) holding callbacks; closures capturing `this`; `IDisposable` transients resolved from the root DI provider; async state machines kept alive by tasks that never complete; and `ConditionalWeakTable` misuse. To find them take two `dotnet-gcdump` snapshots some minutes apart, diff by type, and inspect retention paths to GC roots; confirm growth with `dotnet-counters` (GC Heap Size, Gen2 Size) and use PerfView heap snapshots for retention graphs. In WPF prefer weak event patterns and unsubscribe in `Unloaded` or `Dispose`.",
+    "followups": [
+      "Why does the GC handle cycles fine but not a rooted graph?",
+      "What problem does `WeakReference<T>` actually solve and where is it the wrong tool?"
+    ],
+    "tags": ["memory-leaks", "diagnostics"]
+  },
+  {
+    "id": "gc-008",
+    "topic": "gc",
+    "difficulty": "core",
+    "question": "Explain the `IDisposable` pattern, when a finalizer is needed, and why `SafeHandle` is the modern answer.",
+    "answer": "Implement `IDisposable` on anything that owns unmanaged resources or other disposables. The full pattern with `Dispose(bool)` and `GC.SuppressFinalize` is only needed when you directly own a raw unmanaged handle, and the modern answer is to wrap that handle in a `SafeHandle` subclass so you never write a finalizer yourself. Finalizers run on a single finalizer thread, non-deterministically, after the object has survived at least one extra collection and been promoted, so they are a last-resort safety net rather than a cleanup strategy and they delay memory reclamation. Prefer `using` and `await using`, implement `IAsyncDisposable` where teardown is asynchronous, and let the DI container own lifetimes.",
+    "followups": [
+      "What does `GC.SuppressFinalize` do and what does forgetting it cost?",
+      "How does `SafeHandle` prevent handle-recycling races during P/Invoke?"
+    ],
+    "tags": ["idisposable", "finalizers", "safehandle"]
+  },
+  {
+    "id": "gc-009",
+    "topic": "gc",
+    "difficulty": "senior",
+    "question": "What are the typical allocation anti-patterns in hot paths, and how do you measure before and after?",
+    "answer": "Boxing value types through non-generic collections, `object` parameters or string interpolation of structs; closures allocated per call; `params` arrays; LINQ chains allocating iterators and delegates; string concatenation in loops; defensive `ToList()` calls; exceptions used for control flow; and async methods that could complete synchronously but return `Task` instead of `ValueTask`. Measure first: BenchmarkDotNet with `MemoryDiagnoser` for the micro view, `dotnet-counters` Allocation Rate and `dotnet-trace` allocation sampling for the running service, and only optimise paths that show up. The JIT performs escape analysis in limited cases only, so do not rely on it to remove allocations for you.",
+    "followups": [
+      "How do you spot boxing with analyzers or in IL?",
+      "When is a struct the wrong choice? (large, mutable, copied often, used through interfaces)"
+    ],
+    "tags": ["allocations", "performance", "benchmarkdotnet"]
+  },
+  {
+    "id": "gc-010",
+    "topic": "gc",
+    "difficulty": "deep",
+    "question": "When is calling `GC.Collect()` justified? What do `GCSettings.LatencyMode` and `GC.TryStartNoGCRegion` offer latency-sensitive code?",
+    "answer": "Almost never: `GC.Collect()` forces a blocking full collection, promotes survivors prematurely and defeats the generational heuristic. The rare legitimate uses are right after a known large release of memory in a quiescent phase, such as a level load in a game or between benchmark iterations, and in diagnostics. `GCSettings.LatencyMode = SustainedLowLatency` tells the collector to avoid blocking Gen2 collections while the mode is set, trading memory for latency in UI or trading paths. `GC.TryStartNoGCRegion(size)` pre-commits enough memory so a critical section can run with no collections at all, and must be ended with `EndNoGCRegion`. Read `GC.GetGCMemoryInfo()` in health checks to expose pause times and heap sizes.",
+    "followups": [
+      "What happens if you allocate more than the budget inside a no-GC region?",
+      "Why does `GC.Collect()` in a cache-eviction routine usually make things worse?"
+    ],
+    "tags": ["gc-collect", "latency"]
+  }
+]

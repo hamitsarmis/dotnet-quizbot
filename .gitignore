@@ -1,0 +1,20 @@
+# Secrets: the bot token lives here and must never be committed.
+.env
+
+# Runtime data (SQLite database, bind-mounted into the container).
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+bin/
+obj/
+TestResults/
+*.trx
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user

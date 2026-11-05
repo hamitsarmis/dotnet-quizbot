@@ -1,0 +1,158 @@
+[
+  {
+    "id": "web-001",
+    "topic": "aspnetcore",
+    "difficulty": "core",
+    "question": "Explain the ASP.NET Core middleware pipeline. Why does order matter? Give two concrete misorderings and what breaks.",
+    "answer": "Middleware is a chain of `RequestDelegate`s built once at startup; each component does its work and decides whether to call `next`. Typical order: exception handling first so it wraps everything, then HSTS and HTTPS redirection, static files (which short-circuit), routing, CORS, authentication, authorization, and finally endpoints. Misorderings: authorization before authentication means every request is either rejected or passes unchecked, because there is no principal yet; CORS registered after routing and endpoints means preflight requests never get the headers and the browser blocks the call. Filters in MVC and endpoint filters in minimal APIs run inside the endpoint, not in the pipeline, which is why an exception filter cannot catch a routing or auth failure.",
+    "followups": [
+      "What is the difference between `Use`, `Run` and `Map`?",
+      "When would you write middleware instead of an action filter, and the reverse?"
+    ],
+    "tags": ["middleware", "pipeline"]
+  },
+  {
+    "id": "web-002",
+    "topic": "aspnetcore",
+    "difficulty": "senior",
+    "question": "Authentication versus authorization in ASP.NET Core, and how does JWT bearer validation actually work per request?",
+    "answer": "Authentication establishes identity: a handler turns credentials or a token into a `ClaimsPrincipal`. Authorization decides what that principal may do, through policies, roles and resource-based handlers. For JWT bearer the middleware validates the signature against the issuer's signing keys fetched from the OIDC discovery document and cached with rotation, then checks issuer, audience, expiry and clock skew; it does not call the identity provider on every request. Authorization then applies `[Authorize(Policy = ...)]` or `RequireAuthorization()` with requirements and handlers. Keep tokens short-lived with refresh, put no secrets in the payload, pin the expected algorithm, and remember `[Authorize]` without authentication middleware registered fails every request.",
+    "followups": [
+      "Access token versus ID token: which one does your API validate and why?",
+      "How does signing-key rotation work without downtime?"
+    ],
+    "tags": ["auth", "jwt", "oidc"]
+  },
+  {
+    "id": "web-003",
+    "topic": "aspnetcore",
+    "difficulty": "senior",
+    "question": "Describe your error-handling strategy for an API: ProblemDetails, exception middleware versus filters, what gets logged at which level, and what the client sees.",
+    "answer": "One global handler (`UseExceptionHandler` with `IExceptionHandler` implementations in .NET 8+) maps exceptions to RFC 7807 ProblemDetails with a `traceId`, hides stack traces outside Development, and logs unexpected exceptions at Error. Expected domain outcomes (not found, conflict, validation) are not exceptions at all: handlers return results mapped to 404, 409 or 422 with ProblemDetails, and are logged at Information or not at all. MVC exception filters only see exceptions inside controller actions and miss middleware, routing and auth failures, so the middleware is the backbone and filters are optional sugar. Make the status mapping explicit in one place, wire health checks and structured logging so the handler output is queryable by correlation id.",
+    "followups": [
+      "Result pattern versus exceptions for domain errors: trade-offs?",
+      "How do you avoid leaking internal details through ProblemDetails `detail`?"
+    ],
+    "tags": ["errors", "problemdetails"]
+  },
+  {
+    "id": "web-004",
+    "topic": "aspnetcore",
+    "difficulty": "senior",
+    "question": "What caching options does ASP.NET Core offer, and how do you handle invalidation and cache stampedes?",
+    "answer": "Output caching (`AddOutputCache`, .NET 7+) stores whole responses server-side with policies and tag-based eviction; response caching only sets HTTP cache headers for clients and proxies. `IMemoryCache` is in-process and fast but lost on restart and not shared across instances, so set size limits and expirations; `IDistributedCache` and HybridCache (.NET 9) add Redis or SQL backing, serialization and built-in stampede protection. Invalidation is the hard part: prefer short TTLs plus versioned keys, tag eviction, or event-driven invalidation from the write path. Protect hot keys from stampedes with single-flight (`GetOrCreateAsync` under a per-key lock, or HybridCache) and never cache per-user data in a shared key.",
+    "followups": [
+      "Cache-aside versus write-through: when each?",
+      "How do you measure whether a cache is worth its complexity?"
+    ],
+    "tags": ["caching", "hybridcache"]
+  },
+  {
+    "id": "web-005",
+    "topic": "aspnetcore",
+    "difficulty": "senior",
+    "question": "How does graceful shutdown work in a .NET host, and what are the rules for `IHostedService` and `BackgroundService`?",
+    "answer": "On SIGTERM the host stops accepting new requests, lets in-flight requests finish within `HostOptions.ShutdownTimeout` (set it explicitly and keep the orchestrator's grace period longer), then stops hosted services in reverse registration order. `StartAsync` must return quickly; long work belongs in `BackgroundService.ExecuteAsync`, which must honour the stopping token in every loop and every awaited call. Since .NET 6 an unhandled exception in `ExecuteAsync` stops the whole host by default (`BackgroundServiceExceptionBehavior`), so catch and log per iteration and let the loop continue. Expose readiness and liveness health checks separately, and drain in-memory queues (`Channel`) on shutdown or accept the loss explicitly.",
+    "followups": [
+      "What does `IHostApplicationLifetime.ApplicationStopping` let you do?",
+      "How do you test a BackgroundService without sleeping in the test?"
+    ],
+    "tags": ["hosting", "shutdown", "backgroundservice"]
+  },
+  {
+    "id": "web-006",
+    "topic": "aspnetcore",
+    "difficulty": "core",
+    "question": "Minimal APIs versus controllers: how do you choose, and how do you structure a service that uses minimal APIs?",
+    "answer": "Minimal APIs are lambdas with explicit parameter binding (route, query, body, services, keyed services), endpoint filters and `TypedResults`, with less ceremony, faster startup and good native-AOT support. Controllers bring attribute routing, action filters, model-state validation and conventions that large teams already know. Pick one style per service and stay consistent. With minimal APIs, group endpoints per feature with `MapGroup` and an extension method per slice, apply auth and validation at the group level, use `TypedResults` for OpenAPI accuracy, FluentValidation or the built-in validation in .NET 10, and version through a URL segment or header. Return ProblemDetails for every 4xx.",
+    "followups": [
+      "How does body binding behave when the content type is wrong?",
+      "How do you share a filter across several groups?"
+    ],
+    "tags": ["minimal-apis", "controllers"]
+  },
+  {
+    "id": "data-001",
+    "topic": "data",
+    "difficulty": "core",
+    "question": "EF Core tracking versus no-tracking: what does the change tracker do, when do you turn it off, and why should a `DbContext` be short-lived?",
+    "answer": "By default queries track entities so `SaveChanges` can detect modifications by comparing against snapshots; tracking costs memory and CPU per entity and performs identity resolution, returning the already-loaded instance for a given key. For read-only paths use `AsNoTracking()`, or set `QueryTrackingBehavior.NoTracking` globally and opt in for writes; use `AsNoTrackingWithIdentityResolution` when you need de-duplicated graphs without tracking. Better still, project into DTOs with `Select`, which avoids tracking entirely and fetches fewer columns. A context should live for one unit of work: a long-lived context accumulates tracked entities, serves stale first-level-cache data and is not thread-safe.",
+    "followups": [
+      "What does `Update()` do compared with attaching and setting one property?",
+      "Snapshot versus notification change tracking: when would you switch?"
+    ],
+    "tags": ["efcore", "tracking"]
+  },
+  {
+    "id": "data-002",
+    "topic": "data",
+    "difficulty": "core",
+    "question": "What is the N+1 problem in EF Core, how do you detect it, and how do you fix it? When does `Include` make things worse?",
+    "answer": "N+1 is one query for a list of parents followed by one query per parent for its children, usually from lazy loading or looping over navigation properties. Detect it with query logging (`LogTo`), MiniProfiler, a query-count assertion in integration tests or the database's query store. Fix it with eager loading via `Include`/`ThenInclude`, or, better, a single projection that selects exactly the shape you need. `Include` of several collections produces a cartesian explosion in one join; use `AsSplitQuery()` or project instead. Disable lazy-loading proxies in services and use explicit loading where loading on demand is intentional.",
+    "followups": [
+      "When is a split query worse than one join?",
+      "How do you page a parent-child projection efficiently?"
+    ],
+    "tags": ["efcore", "n-plus-1"]
+  },
+  {
+    "id": "data-003",
+    "topic": "data",
+    "difficulty": "senior",
+    "question": "How do you handle concurrent updates with EF Core? Explain optimistic concurrency tokens and how a conflict surfaces to an HTTP client.",
+    "answer": "Mark a `byte[] RowVersion` property with `[Timestamp]` or `IsRowVersion()` (SQL Server rowversion), or configure any property as a concurrency token. EF then appends `WHERE RowVersion = @original` to UPDATE and DELETE statements and throws `DbUpdateConcurrencyException` when zero rows are affected. Handle it per use case: reload and retry (database wins), merge selected fields (client wins), or return 409 Conflict carrying the current ETag so the client can re-read and resubmit; the row version maps naturally to an HTTP ETag with `If-Match`. Pessimistic locking (`UPDLOCK`, `SELECT ... FOR UPDATE`) is for short critical sections such as inventory decrement; across services use idempotency keys and compare-and-swap, not long transactions.",
+    "followups": [
+      "Why not simply use SERIALIZABLE isolation instead?",
+      "How does the execution strategy (`EnableRetryOnFailure`) interact with user-initiated transactions?"
+    ],
+    "tags": ["efcore", "concurrency", "etag"]
+  },
+  {
+    "id": "data-004",
+    "topic": "data",
+    "difficulty": "senior",
+    "question": "Explain SQL Server isolation levels in practice, and how you diagnose and fix deadlocks.",
+    "answer": "READ COMMITTED (default) prevents dirty reads but allows non-repeatable reads and phantoms; enabling READ COMMITTED SNAPSHOT makes readers use row versions so they stop blocking writers, usually the first thing to turn on. REPEATABLE READ holds shared locks to the end of the transaction, SERIALIZABLE adds range locks, SNAPSHOT gives a consistent view with update-conflict detection. Deadlocks come from acquiring locks in different orders, lock escalation, or missing indexes that force updates to lock many rows. Diagnose with the deadlock graph from the `system_health` Extended Events session; fix with consistent access order, shorter transactions, covering indexes, and retrying error 1205 with the EF execution strategy or Polly.",
+    "followups": [
+      "Why can a missing index cause a deadlock?",
+      "What does SNAPSHOT isolation cost in tempdb?"
+    ],
+    "tags": ["sql", "isolation", "deadlocks"]
+  },
+  {
+    "id": "data-005",
+    "topic": "data",
+    "difficulty": "senior",
+    "question": "Index design essentials: clustered versus nonclustered, covering indexes, SARGability, and the cost of too many indexes.",
+    "answer": "The clustered index defines the physical row order, one per table; keep its key narrow, unique and increasing so inserts append instead of splitting pages. Nonclustered indexes are separate B-trees whose leaves point to the clustered key, so a lookup for columns not in the index costs a key lookup per row; add `INCLUDE` columns to make the index covering. Order key columns equality first, then range, matching the predicate and sort. Predicates must be SARGable: functions on columns, leading wildcards and implicit conversions (nvarchar parameter against varchar column) disable index seeks. Every index slows writes and takes space, so review missing-index DMVs and actual plans rather than indexing every column. Statistics and parameter sniffing decide the plan you actually get.",
+    "followups": [
+      "When is a key lookup acceptable?",
+      "What does `OPTION (RECOMPILE)` trade off against plan caching?"
+    ],
+    "tags": ["sql", "indexes"]
+  },
+  {
+    "id": "data-006",
+    "topic": "data",
+    "difficulty": "senior",
+    "question": "How do you run EF Core migrations in CI/CD, and how do you change a schema without downtime?",
+    "answer": "Generate migrations in development, review the SQL with `dotnet ef migrations script --idempotent`, and apply it as a dedicated deployment step (pipeline job or migration runner), not with `Database.Migrate()` racing from every app instance at startup. For zero downtime use expand and contract: add the new column as nullable, deploy code that writes both, backfill in batches, switch reads, then drop the old column in a later release. Avoid long locks, such as adding non-null columns with defaults on huge tables or rebuilding clustered indexes during peak hours, and test migrations against production-sized data. Keep migrations forward-only; down scripts are rarely safe once data exists.",
+    "followups": [
+      "How do you handle a migration while old pods still serve traffic?",
+      "Where should seed data live?"
+    ],
+    "tags": ["efcore", "migrations", "deployment"]
+  },
+  {
+    "id": "data-007",
+    "topic": "data",
+    "difficulty": "senior",
+    "question": "Pagination and bulk operations: why is offset paging a problem, what is keyset paging, and how do you do bulk writes with EF Core?",
+    "answer": "Offset paging (`Skip`/`Take`) scans and discards all rows before the offset, so it degrades as pages go deeper and is unstable under concurrent inserts. Keyset paging seeks directly: `WHERE (CreatedAt, Id) < (@lastCreatedAt, @lastId) ORDER BY CreatedAt DESC, Id DESC` with a matching index, giving O(page) cost and stable results; expose the last key as an opaque cursor. For bulk writes use `ExecuteUpdate` and `ExecuteDelete` (EF Core 7+), `SqlBulkCopy` or table-valued parameters instead of tracking thousands of entities; mind batch sizes for log growth and lock duration. Stream large reads with `AsAsyncEnumerable()` and always bound page sizes in APIs.",
+    "followups": [
+      "When is `ExecuteUpdate` dangerous? (bypasses change tracker, interceptors and concurrency tokens)",
+      "How do you make a cursor opaque and tamper-proof?"
+    ],
+    "tags": ["sql", "pagination", "bulk"]
+  }
+]

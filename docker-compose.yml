@@ -1,0 +1,32 @@
+services:
+  # One-shot helper: a bind-mounted ./data keeps its host ownership (root, if Docker created it), but the bot runs
+  # as the non-root `app` user (UID 1654). Fixing ownership here makes `docker compose up -d` work on a clean machine.
+  quizbot-data-init:
+    image: quizbot:latest
+    build: .
+    user: root
+    entrypoint: ["chown", "-R", "1654:1654", "/data"]
+    volumes:
+      - ./data:/data
+    restart: "no"
+
+  quizbot:
+    image: quizbot:latest
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      quizbot-data-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/data
+      - ./questions:/questions:ro
+    mem_limit: 256m
+    # Longer than HostOptions.ShutdownTimeout (20 s, Program.cs): the host finishes its own graceful shutdown
+    # before Docker escalates SIGTERM to SIGKILL.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
